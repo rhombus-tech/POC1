@@ -1,0 +1,14 @@
+[package]
+name = "Shuttle_VM"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+wasmlanche = "0.1.0" # Replace with the correct version
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Add other dependencies as needed
+types = { path = "path/to/types" }
+state = { path = "path/to/state" }
+core = { path = "path/to/core" }
