@@ -40,6 +40,15 @@ state_schema! {
     KeepId(Address) => String,
     /// Drawbridge attestation tokens
     DrawbridgeToken(Address) => Vec<u8>,
+
+    /// Stores execution results for verification
+    ExecutionResult(u128) => ExecutionResult,
+    /// Maps execution IDs to verification status
+    ExecutionVerified(u128) => bool,
+    /// Tracks pending verifications
+    PendingVerifications() => Vec<u128>,
+    /// Stores mismatched executions for analysis
+    ExecutionMismatches(u128) => (ExecutionResult, ExecutionResult),
 }
 
 // Helper functions for state management
