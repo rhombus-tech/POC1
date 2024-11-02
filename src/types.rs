@@ -35,13 +35,13 @@ pub enum ChallengeStatus {
 
 #[derive(Debug, Clone)]
 pub struct Operator {
-    pub initialized: bool,
-    pub tee_signature_address: String,
-    pub tee_encryption_key: Vec<u8>,
-    pub attestation_report: Vec<u8>,
-    pub last_heartbeat: u64,
-    pub challenges_initiated: u64,
-    pub challenges_responded: u64,
+    initialized: bool,
+    keep_id: String,           // New: Enarx Keep identifier
+    attestation_report: Vec<u8>,
+    drawbridge_token: Vec<u8>, // New: Enarx attestation token
+    last_heartbeat: u64,
+    challenges_initiated: u64,
+    challenges_responded: u64,
 }
 
 #[derive(Debug, Clone)]
