@@ -384,3 +384,181 @@ fn renew_attestation(context: &mut Context, attestation_report: Vec<u8>, drawbri
     context.store_by_key(LastAttestationTime(caller), context.timestamp())
         .expect("failed to update attestation time");
 }
+
+mod executor_verification {
+    use super::*;
+
+    #[test]
+    fn test_executor_attestation() {
+        let mut context = setup();
+        let sgx_executor = Address::from([3u8; 32]);
+
+        // Register with Enarx Keep data
+        context.set_caller(sgx_executor);
+        register_executor(
+            &mut context,
+            EnclaveType::IntelSGX,
+            SGX_OPERATOR.to_string(),
+            "sgx-keep-123".to_string(),
+            vec![1u8; 32], // Unique attestation data
+            vec![2u8; 64], // Unique Drawbridge token
+        );
+
+        // Original verification
+        let attestation_status = context.get(AttestationStatus(sgx_executor)).unwrap().unwrap();
+        assert!(attestation_status);
+
+        // Enarx-specific verifications
+        let keep_status = context.get(KeepStatus(sgx_executor)).unwrap().unwrap();
+        assert!(keep_status);
+        
+        let last_attestation = context.get(LastAttestationTime(sgx_executor)).unwrap().unwrap();
+        assert!(last_attestation > 0);
+    }
+
+    #[test]
+    fn test_executor_type_verification() {
+        let mut context = setup();
+        let (sgx_executor, sev_executor, _) = setup_system(&mut context);
+
+        // Verify SGX executor type and Keep
+        let sgx_type = context.get(EnclaveType(sgx_executor)).unwrap().unwrap();
+        assert_eq!(sgx_type, EnclaveType::IntelSGX);
+        let sgx_keep_id = context.get(KeepId(sgx_executor)).unwrap().unwrap();
+        assert!(sgx_keep_id.starts_with("sgx"));
+
+        // Verify SEV executor type and Keep
+        let sev_type = context.get(EnclaveType(sev_executor)).unwrap().unwrap();
+        assert_eq!(sev_type, EnclaveType::AMDSEV);
+        let sev_keep_id = context.get(KeepId(sev_executor)).unwrap().unwrap();
+        assert!(sev_keep_id.starts_with("sev"));
+    }
+
+    #[test]
+    fn test_attestation_renewal() {
+        let mut context = setup();
+        let (sgx_executor, _, _) = setup_system(&mut context);
+
+        let initial_attestation = context.get(LastAttestationTime(sgx_executor)).unwrap().unwrap();
+
+        // Simulate time passing
+        context.set_timestamp(initial_attestation + 1000);
+
+        // Submit new attestation
+        context.set_caller(sgx_executor);
+        let new_attestation = vec![3u8; 32];
+        let new_token = vec![4u8; 64];
+        
+        renew_attestation(
+            &mut context,
+            new_attestation.clone(),
+            new_token,
+        );
+
+        // Verify attestation update
+        let updated_time = context.get(LastAttestationTime(sgx_executor)).unwrap().unwrap();
+        assert!(updated_time > initial_attestation);
+    }
+
+    #[test]
+    fn test_keep_measurement_verification() {
+        let mut context = setup();
+        let (sgx_executor, _, _) = setup_system(&mut context);
+
+        context.set_caller(sgx_executor);
+        
+        // Submit initial measurement
+        let initial_measurement = vec![5u8; 32];
+        update_keep_measurement(&mut context, initial_measurement.clone());
+
+        // Verify measurement
+        let stored_measurement = context.get(KeepMeasurement(sgx_executor)).unwrap().unwrap();
+        assert_eq!(stored_measurement, initial_measurement);
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid attestation")]
+    fn test_invalid_attestation() {
+        let mut context = setup();
+        let sgx_executor = Address::from([3u8; 32]);
+
+        context.set_caller(sgx_executor);
+        register_executor(
+            &mut context,
+            EnclaveType::IntelSGX,
+            SGX_OPERATOR.to_string(),
+            "invalid-keep".to_string(),
+            vec![0u8; 32], // Invalid attestation
+            vec![0u8; 64], // Invalid token
+        );
+    }
+
+    #[test]
+    fn test_drawbridge_token_verification() {
+        let mut context = setup();
+        let sgx_executor = Address::from([3u8; 32]);
+
+        // Register with valid Drawbridge token
+        context.set_caller(sgx_executor);
+        let valid_token = vec![6u8; 64];
+        
+        register_executor(
+            &mut context,
+            EnclaveType::IntelSGX,
+            SGX_OPERATOR.to_string(),
+            "sgx-keep-123".to_string(),
+            vec![1u8; 32],
+            valid_token.clone(),
+        );
+
+        // Verify stored token
+        let stored_token = context.get(DrawbridgeToken(sgx_executor)).unwrap().unwrap();
+        assert_eq!(stored_token, valid_token);
+    }
+
+    #[test]
+    fn test_keep_status_verification() {
+        let mut context = setup();
+        let (sgx_executor, _, _) = setup_system(&mut context);
+
+        // Test Keep status transitions
+        context.set_caller(sgx_executor);
+
+        // Initial status should be active
+        assert!(context.get(KeepStatus(sgx_executor)).unwrap().unwrap());
+
+        // Pause Keep
+        pause_keep(&mut context);
+        assert!(!context.get(KeepStatus(sgx_executor)).unwrap().unwrap());
+
+        // Resume Keep
+        resume_keep(&mut context);
+        assert!(context.get(KeepStatus(sgx_executor)).unwrap().unwrap());
+    }
+
+    #[test]
+    fn test_attestation_expiration() {
+        let mut context = setup();
+        let (sgx_executor, _, _) = setup_system(&mut context);
+
+        let initial_attestation = context.get(LastAttestationTime(sgx_executor)).unwrap().unwrap();
+
+        // Simulate time passing beyond attestation validity
+        context.set_timestamp(initial_attestation + ATTESTATION_VALIDITY_PERIOD + 1);
+
+        // Verify attestation is expired
+        context.set_caller(sgx_executor);
+        assert!(!is_attestation_valid(&mut context, sgx_executor));
+    }
+}
+
+// Constants for verification
+const ATTESTATION_VALIDITY_PERIOD: u64 = 86400; // 24 hours in seconds
+
+// Helper function for attestation validation
+fn is_attestation_valid(context: &mut Context, executor: Address) -> bool {
+    let last_attestation = context.get(LastAttestationTime(executor)).unwrap().unwrap();
+    let current_time = context.timestamp();
+    
+    current_time - last_attestation <= ATTESTATION_VALIDITY_PERIOD
+}
