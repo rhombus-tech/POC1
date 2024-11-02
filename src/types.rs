@@ -110,3 +110,13 @@ pub struct Contract {
     pub state_root: Vec<u8>,
     pub last_verified_block: u64,
 }
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExecutionResult {
+    pub result_hash: Vec<u8>,      // Checksum of execution result
+    pub execution_id: u128,        // Unique ID for this execution
+    pub executor: Address,         // Address of executor
+    pub enclave_type: EnclaveType,
+    pub timestamp: u64,
+    pub block_height: u64,
+}
