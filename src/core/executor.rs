@@ -9,10 +9,58 @@ use crate::{
 pub fn register_executor(
     context: &mut Context,
     enclave_type: EnclaveType,
-    operator_address: String,
+    keep_id: String,
     attestation_report: Vec<u8>,
-    tee_signature: Vec<u8>,
+    drawbridge_token: Vec<u8>,
 ) {
+    ensure_initialized(context);
+    ensure_phase(context, Phase::Creation);
+
+    let caller = context.actor();
+    
+    // Verify Enarx Keep attestation
+    assert!(
+        verify_attestation_report(
+            context,
+            &attestation_report,
+            &drawbridge_token,
+            enclave_type
+        ),
+        "invalid attestation"
+    );
+
+    let mut executor_pool = context
+        .get(ExecutorPool())
+        .expect("state corrupt")
+        .expect("executor pool not initialized");
+
+    match enclave_type {
+        EnclaveType::IntelSGX => {
+            assert!(executor_pool.sgx_executor.is_none(), "SGX executor slot already filled");
+            executor_pool.sgx_executor = Some(caller);
+        },
+        EnclaveType::AMDSEV => {
+            assert!(executor_pool.sev_executor.is_none(), "SEV executor slot already filled");
+            executor_pool.sev_executor = Some(caller);
+        }
+    }
+
+    // Store updated state with Enarx info
+    context
+        .store((
+            (ExecutorPool(), executor_pool.clone()),
+            (EnclaveType(caller), enclave_type),
+            (KeepId(caller), keep_id),              // New
+            (DrawbridgeToken(caller), drawbridge_token), // New
+            (AttestationStatus(caller), true),
+            (HeartbeatTimestamp(caller), context.timestamp()),
+        ))
+        .expect("failed to register executor");
+
+    if executor_pool.sgx_executor.is_some() && executor_pool.sev_executor.is_some() {
+        transition_to_executing(context);
+    }
+}
     ensure_initialized(context);
     ensure_phase(context, Phase::Creation);
 
