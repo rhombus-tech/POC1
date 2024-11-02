@@ -562,3 +562,228 @@ fn is_attestation_valid(context: &mut Context, executor: Address) -> bool {
     
     current_time - last_attestation <= ATTESTATION_VALIDITY_PERIOD
 }
+
+mod executor_phase_transitions {
+    use super::*;
+
+    #[test]
+    fn test_phase_transitions() {
+        let mut context = setup();
+        
+        // Initial phase
+        assert_eq!(get_current_phase(&mut context), Phase::Creation);
+
+        // Register SGX executor with Enarx Keep
+        let sgx_executor = Address::from([3u8; 32]);
+        context.set_caller(sgx_executor);
+        register_executor(
+            &mut context,
+            EnclaveType::IntelSGX,
+            SGX_OPERATOR.to_string(),
+            "sgx-keep-123".to_string(),
+            vec![0u8; 32],
+            vec![0u8; 64],
+        );
+        assert_eq!(get_current_phase(&mut context), Phase::Creation);
+
+        // Register SEV executor with Enarx Keep
+        let sev_executor = Address::from([4u8; 32]);
+        context.set_caller(sev_executor);
+        register_executor(
+            &mut context,
+            EnclaveType::AMDSEV,
+            SEV_OPERATOR.to_string(),
+            "sev-keep-456".to_string(),
+            vec![0u8; 32],
+            vec![0u8; 64],
+        );
+        assert_eq!(get_current_phase(&mut context), Phase::Executing);
+
+        // Verify Keep states after phase transition
+        assert!(context.get(KeepStatus(sgx_executor)).unwrap().unwrap());
+        assert!(context.get(KeepStatus(sev_executor)).unwrap().unwrap());
+    }
+
+    #[test]
+    fn test_phase_transition_with_keep_verification() {
+        let mut context = setup();
+        let sgx_executor = Address::from([3u8; 32]);
+        let sev_executor = Address::from([4u8; 32]);
+
+        // Register both executors with initial attestations
+        context.set_caller(sgx_executor);
+        register_executor(
+            &mut context,
+            EnclaveType::IntelSGX,
+            SGX_OPERATOR.to_string(),
+            "sgx-keep-123".to_string(),
+            vec![1u8; 32],
+            vec![1u8; 64],
+        );
+
+        context.set_caller(sev_executor);
+        register_executor(
+            &mut context,
+            EnclaveType::AMDSEV,
+            SEV_OPERATOR.to_string(),
+            "sev-keep-456".to_string(),
+            vec![2u8; 32],
+            vec![2u8; 64],
+        );
+
+        // Verify all states after transition
+        assert_eq!(get_current_phase(&mut context), Phase::Executing);
+        
+        // Verify Keep states
+        for executor in [sgx_executor, sev_executor].iter() {
+            assert!(context.get(KeepStatus(*executor)).unwrap().unwrap());
+            assert!(context.get(LastAttestationTime(*executor)).unwrap().unwrap() > 0);
+            let keep_id = context.get(KeepId(*executor)).unwrap().unwrap();
+            assert!(keep_id.contains("keep"));
+        }
+    }
+
+    #[test]
+    fn test_challenge_phase_transition() {
+        let mut context = setup();
+        let (sgx_executor, _, watchdogs) = setup_system(&mut context);
+
+        // Initial phase should be Executing
+        assert_eq!(get_current_phase(&mut context), Phase::Executing);
+
+        // Create challenge
+        context.set_caller(watchdogs[0]);
+        challenge_executor(
+            &mut context,
+            sgx_executor,
+            ChallengeType::Attestation,
+            vec![0u8; 32],
+        );
+
+        // Verify transition to ChallengeExecutor phase
+        assert_eq!(get_current_phase(&mut context), Phase::ChallengeExecutor);
+
+        // Verify Keep remains active during challenge
+        assert!(context.get(KeepStatus(sgx_executor)).unwrap().unwrap());
+    }
+
+    #[test]
+    fn test_recovery_phase_transition() {
+        let mut context = setup();
+        let (sgx_executor, _, watchdogs) = setup_system(&mut context);
+
+        // Create and fail challenge
+        context.set_caller(watchdogs[0]);
+        challenge_executor(
+            &mut context,
+            sgx_executor,
+            ChallengeType::Attestation,
+            vec![0u8; 32],
+        );
+
+        let challenge_id = context.get(ChallengeCount()).unwrap().unwrap();
+
+        // Fail the challenge
+        for watchdog in watchdogs.iter() {
+            context.set_caller(*watchdog);
+            verify_challenge_response(
+                &mut context,
+                challenge_id,
+                false,
+                vec![0u8; 32],
+            );
+        }
+
+        // Replace executor
+        context.set_caller(watchdogs[0]);
+        replace_executor(
+            &mut context,
+            sgx_executor,
+            vec![0u8; 32],
+            vec![0u8; 64],
+        );
+
+        // Verify phase returned to Executing
+        assert_eq!(get_current_phase(&mut context), Phase::Executing);
+
+        // Verify new Keep is active and old one is inactive
+        assert!(!context.get(KeepStatus(sgx_executor)).unwrap().unwrap());
+        assert!(context.get(KeepStatus(watchdogs[0])).unwrap().unwrap());
+    }
+
+    #[test]
+    fn test_phase_transitions_with_attestation_renewal() {
+        let mut context = setup();
+        let (sgx_executor, sev_executor, _) = setup_system(&mut context);
+
+        // Simulate attestation expiration
+        context.set_timestamp(context.timestamp() + ATTESTATION_VALIDITY_PERIOD + 1);
+
+        // Renew attestations
+        for executor in [sgx_executor, sev_executor].iter() {
+            context.set_caller(*executor);
+            renew_attestation(
+                &mut context,
+                vec![3u8; 32],
+                vec![3u8; 64],
+            );
+        }
+
+        // Verify system remains in Executing phase
+        assert_eq!(get_current_phase(&mut context), Phase::Executing);
+
+        // Verify renewed attestations
+        for executor in [sgx_executor, sev_executor].iter() {
+            assert!(is_attestation_valid(&mut context, *executor));
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid phase transition")]
+    fn test_invalid_phase_transition() {
+        let mut context = setup();
+        
+        // Attempt to transition directly to Executing
+        context.store_by_key(CurrentPhase(), Phase::Executing)
+            .expect("failed to update phase");
+
+        // This should panic as we haven't properly registered executors
+        verify_phase_transition(&mut context);
+    }
+
+    #[test]
+    fn test_keep_synchronization_during_transition() {
+        let mut context = setup();
+        let (sgx_executor, sev_executor, _) = setup_system(&mut context);
+
+        // Verify Keep states are synchronized after transition
+        let sgx_last_attestation = context
+            .get(LastAttestationTime(sgx_executor))
+            .unwrap()
+            .unwrap();
+        let sev_last_attestation = context
+            .get(LastAttestationTime(sev_executor))
+            .unwrap()
+            .unwrap();
+
+        // Attestation times should be close (within same block)
+        assert!((sgx_last_attestation as i64 - sev_last_attestation as i64).abs() < 10);
+    }
+}
+
+// Helper function for phase transition verification
+fn verify_phase_transition(context: &mut Context) {
+    let current_phase = get_current_phase(context);
+    let executor_pool = context.get(ExecutorPool()).unwrap().unwrap();
+
+    match current_phase {
+        Phase::Executing => {
+            assert!(executor_pool.sgx_executor.is_some(), "missing SGX executor");
+            assert!(executor_pool.sev_executor.is_some(), "missing SEV executor");
+        },
+        Phase::Creation => {
+            // Creation phase allows partial registration
+        },
+        _ => panic!("invalid phase transition"),
+    }
+}
