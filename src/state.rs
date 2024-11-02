@@ -35,6 +35,11 @@ state_schema! {
     /// External contract references
     TokenContract() => Address,
     GovernanceContract() => Address,
+
+     /// Enarx Keep identifiers
+    KeepId(Address) => String,
+    /// Drawbridge attestation tokens
+    DrawbridgeToken(Address) => Vec<u8>,
 }
 
 // Helper functions for state management
