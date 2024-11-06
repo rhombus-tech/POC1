@@ -1,87 +1,75 @@
+Original Version:
+
 use wasmlanche::{public, Context, Address};
-use crate::{
-    types::*,
-    state::*,
-    core::utils::hash_message,
-};
+use crate::types::{Challenge, ChallengeType, ChallengeStatus, ChallengeEvidence};
 
 #[public]
-pub fn challenge_executor(
+pub async fn challenge_executor(
     context: &mut Context,
     executor: Address,
     challenge_type: ChallengeType,
-    challenge_ Vec<u8>,
-) {
-    ensure_initialized(context);
-    ensure_phase(context, Phase::Executing);
-
+    evidence_requirements: ChallengeEvidence,
+) -> Result<Challenge, Error> {
     let caller = context.actor();
-    let timestamp = context.timestamp();
+    ensure_watchdog(context, caller)?;
 
-    // Verify caller is a watchdog
+    // Create challenge with Enarx-specific requirements
+    let challenge = match evidence_requirements {
+        ChallengeEvidence::AttestationEvidence { .. } => {
+            Challenge {
+                id: generate_challenge_id(),
+                challenger: caller,
+                challenged: executor,
+                challenge_type: ChallengeType::Attestation,
+                requirements: ChallengeRequirements::Attestation {
+                    required_tcb_level: Some("latest".to_string()),
+                    verify_drawbridge: true,
+                    verify_health: true,
+                },
+                status: ChallengeStatus::Pending,
+                deadline: context.timestamp() + CHALLENGE_TIMEOUT,
+            }
+        },
+        ChallengeEvidence::ExecutionEvidence { .. } => {
+            Challenge {
+                id: generate_challenge_id(),
+                challenger: caller,
+                challenged: executor,
+                challenge_type: ChallengeType::Execution,
+                requirements: ChallengeRequirements::Execution {
+                    verify_measurement: true,
+                    verify_proof: true,
+                },
+                status: ChallengeStatus::Pending,
+                deadline: context.timestamp() + CHALLENGE_TIMEOUT,
+            }
+        },
+    };
+
+    // Store challenge
+    store_challenge(context, &challenge)?;
+
+    Ok(challenge)
+}
+
+fn ensure_watchdog(context: &Context, address: Address) -> Result<(), Error> {
     let watchdog_pool = context
         .get(WatchdogPool())
         .expect("state corrupt")
-        .expect("watchdog pool not initialized");
+        .ok_or(Error::StateError("watchdog pool not initialized"))?;
 
-    assert!(
-        watchdog_pool.watchdogs.iter().any(|(addr, _)| *addr == caller),
-        "not authorized watchdog"
-    );
-
-    // Verify target is an executor
-    let executor_pool = context
-        .get(ExecutorPool())
-        .expect("state corrupt")
-        .expect("executor pool not initialized");
-
-    assert!(
-        executor_pool.sgx_executor == Some(executor) || executor_pool.sev_executor == Some(executor),
-        "target is not an executor"
-    );
-
-    // Create new challenge
-    let challenge_id = context
-        .get(ChallengeCount())
-        .expect("state corrupt")
-        .unwrap_or(0) + 1;
-
-    let challenge = Challenge {
-        id: challenge_id,
-        challenger: caller,
-        challenged: executor,
-        challenge_type,
-        challenge_data,
-        response_deadline: timestamp + crate::CHALLENGE_RESPONSE_WINDOW,
-        status: ChallengeStatus::Pending,
-        verification_proofs: Vec::new(),
-    };
-
-    // Update challenge tracking
-    let mut active_challenges = context
-        .get(ActiveChallenges())
-        .expect("state corrupt")
-        .unwrap_or_default();
-    active_challenges.push(challenge_id);
-
-    // Store challenge state
-    context
-        .store((
-            (Challenge(challenge_id), challenge),
-            (ChallengeCount(), challenge_id),
-            (ActiveChallenges(), active_challenges),
-            (CurrentPhase(), Phase::ChallengeExecutor),
-        ))
-        .expect("failed to create challenge");
-
-    // Update operator stats
-    if let Some(mut operator) = context
-        .get(OperatorData(caller.to_string()))
-        .expect("state corrupt")
-    {
-        operator.challenges_initiated += 1;
-        context
-            .store_by_key(OperatorData(caller.to_string()), operator)
-            .expect("failed to update operator stats");
+    if !watchdog_pool.contains(&address) {
+        return Err(Error::Unauthorized("not a watchdog".into()));
     }
+
+    Ok(())
 }
+
+#[derive(Debug)]
+pub enum Error {
+    StateError(String),
+    Unauthorized(String),
+    StorageError(String),
+}
+New Version with centralized error handling:
+
