@@ -7,5 +7,7 @@ edition = "2021"
 wasmlanche = { version = "0.1.0" }
 tokio = { version = "1.0", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
+enarx-keep-api = "0.1.0"
+enarx-attestation = "0.1.0"
 tee-contract-core = { path = "../core" }
 tee-contract-types = { path = "../types" }
