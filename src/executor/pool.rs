@@ -1,6 +1,9 @@
-use crate::enarx::{EnarxManager, Keep, EnarxConfig};
+use crate::enarx::{EnarxManager, Keep, EnarxConfig, DrawbridgeToken};
 use crate::types::{EnclaveType, ExecutionResult};
+use crate::challenge::{Challenge, ChallengeType, ChallengeStatus, ChallengeEvidence};
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::{SystemTime, Duration};
 use tokio::sync::RwLock;
 
 pub struct ExecutorPool {
@@ -46,6 +49,18 @@ struct VerificationPair {
     sgx_result: Option<ExecutionResult>,
     sev_result: Option<ExecutionResult>,
     verified: bool,
+}
+
+#[derive(Debug)]
+pub enum Error {
+    ExecutorNotFound,
+    UnhealthyKeep,
+    ExecutionFailed(String),
+    VerificationFailed(String),
+    ChallengeError(String),
+    ExecutionNotFound,
+    InvalidEvidence,
+    EnarxError(String),
 }
 
 impl ExecutorPool {
@@ -145,13 +160,13 @@ impl ExecutorPool {
             execution_id,
             result,
             keep_id: instance.keep.id().to_string(),
-            timestamp: std::time::SystemTime::now(),
+            timestamp: SystemTime::now(),
             enclave_type: instance.keep.enclave_type(),
             drawbridge_token: token,
         })
     }
 
-    pub async fn handle_challenge(
+pub async fn handle_challenge(
         &mut self,
         challenge: Challenge,
     ) -> Result<(), Error> {
@@ -239,6 +254,20 @@ impl ExecutorPool {
         Ok(())
     }
 
+    async fn submit_challenge_evidence(
+        &mut self,
+        challenge_id: u128,
+        evidence: ChallengeEvidence,
+    ) -> Result<(), Error> {
+        // Verify evidence is valid
+        self.verify_evidence(&evidence).await?;
+
+        // Store evidence for verification
+        self.store_challenge_evidence(challenge_id, evidence).await?;
+
+        Ok(())
+    }
+
     pub async fn verify_execution_results(
         &mut self,
         execution_id: u128,
@@ -270,15 +299,23 @@ impl ExecutorPool {
         &mut self,
         execution_id: u128,
     ) -> Result<(), Error> {
+        // Get both results
+        let state = self.state.read().await;
+        let pair = state.verification_results
+            .get(&execution_id)
+            .ok_or(Error::ExecutionNotFound)?;
+
         // Create challenges for both executors
         let sgx_challenge = self.create_execution_challenge(
             execution_id,
             EnclaveType::IntelSGX,
+            pair.sgx_result.as_ref().unwrap().result_hash.clone(),
         ).await?;
 
         let sev_challenge = self.create_execution_challenge(
             execution_id,
             EnclaveType::AMDSEV,
+            pair.sev_result.as_ref().unwrap().result_hash.clone(),
         ).await?;
 
         // Store challenges
@@ -286,4 +323,296 @@ impl ExecutorPool {
 
         Ok(())
     }
+
+    async fn create_execution_challenge(
+        &self,
+        execution_id: u128,
+        enclave_type: EnclaveType,
+        result_hash: Vec<u8>,
+    ) -> Result<Challenge, Error> {
+        let executor = match enclave_type {
+            EnclaveType::IntelSGX => self.sgx_executor.as_ref(),
+            EnclaveType::AMDSEV => self.sev_executor.as_ref(),
+        }.ok_or(Error::ExecutorNotFound)?;
+
+        Ok(Challenge {
+            id: generate_challenge_id(),
+            challenger: self.select_challenger(enclave_type)?,
+            challenged: executor.address,
+            challenge_type: ChallengeType::Execution,
+            execution_id,
+            result_hash,
+            timestamp: SystemTime::now(),
+            deadline: SystemTime::now() + Duration::from_secs(300), // 5 minute deadline
+            status: ChallengeStatus::Pending,
+        })
+    }
+
+    fn select_challenger(&self, enclave_type: EnclaveType) -> Result<Address, Error> {
+        // Select a watchdog of the same enclave type
+        self.watchdog_verifiers.iter()
+            .find(|(_, w)| w.enclave_type == enclave_type)
+            .map(|(addr, _)| *addr)
+            .ok_or(Error::NoAvailableWatchdog)
+    }
+
+    async fn verify_evidence(
+        &self,
+        evidence: &ChallengeEvidence,
+    ) -> Result<(), Error> {
+        match evidence {
+            ChallengeEvidence::AttestationEvidence {
+                attestation_report,
+                drawbridge_token,
+                keep_health,
+            } => {
+                // Verify attestation
+                if !self.verify_attestation_report(attestation_report).await? {
+                    return Err(Error::InvalidEvidence);
+                }
+
+                // Verify Drawbridge token
+                if !self.verify_drawbridge_token(drawbridge_token).await? {
+                    return Err(Error::InvalidEvidence);
+                }
+
+                // Verify Keep health
+                if !self.verify_keep_health(keep_health).await? {
+                    return Err(Error::InvalidEvidence);
+                }
+            },
+            ChallengeEvidence::ExecutionEvidence {
+                result_hash,
+                execution_proof,
+                keep_measurement,
+            } => {
+                // Verify execution proof
+                if !self.verify_execution_proof(execution_proof, result_hash).await? {
+                    return Err(Error::InvalidEvidence);
+                }
+
+                // Verify Keep measurement
+                if !self.verify_keep_measurement(keep_measurement).await? {
+                    return Err(Error::InvalidEvidence);
+                }
+            },
+        }
+
+        Ok(())
+    }
+
+// Helper functions
+    async fn get_active_executors(&self) -> Result<(&ExecutorInstance, &ExecutorInstance), Error> {
+        match (&self.sgx_executor, &self.sev_executor) {
+            (Some(sgx), Some(sev)) => {
+                // Verify both executors are active
+                if sgx.status != ExecutorStatus::Active || sev.status != ExecutorStatus::Active {
+                    return Err(Error::ExecutorNotActive);
+                }
+                Ok((sgx, sev))
+            }
+            _ => Err(Error::ExecutorNotFound),
+        }
+    }
+
+    fn get_executor_by_address(&mut self, address: Address) -> Result<&mut ExecutorInstance, Error> {
+        if let Some(ref mut sgx) = self.sgx_executor {
+            if sgx.address == address {
+                return Ok(sgx);
+            }
+        }
+        if let Some(ref mut sev) = self.sev_executor {
+            if sev.address == address {
+                return Ok(sev);
+            }
+        }
+        Err(Error::ExecutorNotFound)
+    }
+
+    async fn store_challenges(&mut self, challenges: &[Challenge]) -> Result<(), Error> {
+        for challenge in challenges {
+            self.store_challenge(challenge.clone()).await?;
+        }
+        Ok(())
+    }
+
+    async fn store_challenge(&mut self, challenge: Challenge) -> Result<(), Error> {
+        // Store challenge in state
+        let mut state = self.state.write().await;
+        // Implementation depends on your storage mechanism
+        Ok(())
+    }
+
+    async fn store_challenge_evidence(
+        &mut self,
+        challenge_id: u128,
+        evidence: ChallengeEvidence,
+    ) -> Result<(), Error> {
+        // Store evidence in state
+        let mut state = self.state.write().await;
+        // Implementation depends on your storage mechanism
+        Ok(())
+    }
+
+    async fn verify_attestation_report(
+        &self,
+        report: &AttestationReport,
+    ) -> Result<bool, Error> {
+        // Implement attestation verification logic
+        Ok(true)
+    }
+
+    async fn verify_drawbridge_token(
+        &self,
+        token: &DrawbridgeToken,
+    ) -> Result<bool, Error> {
+        // Implement token verification logic
+        Ok(true)
+    }
+
+    async fn verify_keep_health(
+        &self,
+        health: &KeepHealth,
+    ) -> Result<bool, Error> {
+        // Implement health verification logic
+        Ok(true)
+    }
+
+    async fn verify_execution_proof(
+        &self,
+        proof: &[u8],
+        result_hash: &[u8],
+    ) -> Result<bool, Error> {
+        // Implement proof verification logic
+        Ok(true)
+    }
+
+    async fn verify_keep_measurement(
+        &self,
+        measurement: &[u8],
+    ) -> Result<bool, Error> {
+        // Implement measurement verification logic
+        Ok(true)
+    }
+
+    fn generate_challenge_id() -> u128 {
+        use rand::Rng;
+        rand::thread_rng().gen()
+    }
+}
+
+// Error Implementation
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Error::ExecutorNotFound => write!(f, "Executor not found"),
+            Error::UnhealthyKeep => write!(f, "Unhealthy Keep"),
+            Error::ExecutionFailed(msg) => write!(f, "Execution failed: {}", msg),
+            Error::VerificationFailed(msg) => write!(f, "Verification failed: {}", msg),
+            Error::ChallengeError(msg) => write!(f, "Challenge error: {}", msg),
+            Error::ExecutionNotFound => write!(f, "Execution not found"),
+            Error::InvalidEvidence => write!(f, "Invalid evidence"),
+            Error::EnarxError(msg) => write!(f, "Enarx error: {}", msg),
+            Error::ExecutorNotActive => write!(f, "Executor not active"),
+            Error::NoAvailableWatchdog => write!(f, "No available watchdog"),
+        }
+    }
+}
+
+impl std::error::Error for Error {}
+
+// Tests
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::test;
+
+    async fn setup_test_pool() -> ExecutorPool {
+        let config = EnarxConfig {
+            // Test configuration
+            keep_binary: "test_binary".into(),
+            attestation_config: Default::default(),
+            drawbridge_config: Default::default(),
+        };
+        ExecutorPool::new(config).await.unwrap()
+    }
+
+    #[test]
+    async fn test_executor_registration() {
+        let mut pool = setup_test_pool().await;
+        
+        // Register SGX executor
+        pool.register_executor(
+            Address::from([1u8; 32]),
+            EnclaveType::IntelSGX,
+        ).await.unwrap();
+
+        // Register SEV executor
+        pool.register_executor(
+            Address::from([2u8; 32]),
+            EnclaveType::AMDSEV,
+        ).await.unwrap();
+
+        assert!(pool.sgx_executor.is_some());
+        assert!(pool.sev_executor.is_some());
+    }
+
+    #[test]
+    async fn test_execution_verification() {
+        let mut pool = setup_test_pool().await;
+        
+        // Setup executors
+        let sgx_addr = Address::from([1u8; 32]);
+        let sev_addr = Address::from([2u8; 32]);
+        
+        pool.register_executor(sgx_addr, EnclaveType::IntelSGX).await.unwrap();
+        pool.register_executor(sev_addr, EnclaveType::AMDSEV).await.unwrap();
+
+        // Execute
+        let execution_id = 1u128;
+        let payload = vec![1, 2, 3];
+        
+        let result = pool.execute(execution_id, payload).await.unwrap();
+        
+        // Verify results match
+        assert!(pool.verify_execution_results(execution_id).await.unwrap());
+    }
+
+    #[test]
+    async fn test_challenge_handling() {
+        let mut pool = setup_test_pool().await;
+        
+        // Setup system
+        let sgx_addr = Address::from([1u8; 32]);
+        pool.register_executor(sgx_addr, EnclaveType::IntelSGX).await.unwrap();
+
+        // Create challenge
+        let challenge = Challenge {
+            id: 1u128,
+            challenger: Address::from([3u8; 32]),
+            challenged: sgx_addr,
+            challenge_type: ChallengeType::Attestation,
+            execution_id: None,
+            timestamp: SystemTime::now(),
+            deadline: SystemTime::now() + Duration::from_secs(300),
+            status: ChallengeStatus::Pending,
+        };
+
+        // Handle challenge
+        pool.handle_challenge(challenge).await.unwrap();
+
+        // Verify executor status
+        let executor = pool.get_executor_by_address(sgx_addr).unwrap();
+        assert!(matches!(executor.status, ExecutorStatus::Challenged));
+    }
+
+    #[test]
+    async fn test_mismatch_handling() {
+        let mut pool = setup_test_pool().await;
+        
+        // Setup system with mismatched results
+        // ... test implementation ...
+    }
+
+    // Add more tests as needed...
 }
