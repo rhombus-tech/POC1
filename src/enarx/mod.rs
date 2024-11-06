@@ -184,6 +184,32 @@ impl EnarxManager {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct EnarxConfig {
+    pub keep_binary: PathBuf,
+    pub attestation_config: AttestationConfig,
+    pub drawbridge_config: DrawbridgeConfig,
+    pub heap_size: usize,
+    pub stack_size: usize,
+    pub rotation_threshold: u64,
+    pub rotation_interval: Duration,
+    pub min_watchdogs: usize,
+    pub watchdog_timeout: Duration,
+    pub backup_validity_period: Duration,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AttestationConfig {
+    pub refresh_interval: Duration,
+    pub required_tcb_level: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct DrawbridgeConfig {
+    pub token_refresh_interval: Duration,
+    pub verification_requirements: VerificationRequirements,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("Keep error: {0}")]
