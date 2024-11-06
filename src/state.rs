@@ -49,6 +49,15 @@ state_schema! {
     PendingVerifications() => Vec<u128>,
     /// Stores mismatched executions for analysis
     ExecutionMismatches(u128) => (ExecutionResult, ExecutionResult),
+
+     /// Pool configuration
+    PoolConfig() => EnarxConfig,
+    /// Keep health status
+    KeepHealth(Address) => KeepHealth,
+    /// Execution proofs
+    ExecutionProof(u128) => Vec<u8>,
+    /// Keep measurements
+    KeepMeasurement(Address) => Vec<u8>,
 }
 
 // Helper functions for state management
