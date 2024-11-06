@@ -120,3 +120,25 @@ pub struct ExecutionResult {
     pub timestamp: u64,
     pub block_height: u64,
 }
+
+#[derive(Debug, Clone)]
+pub struct KeepHealth {
+    pub status: KeepStatus,
+    pub memory_usage: MemoryStats,
+    pub last_attestation: u64,
+    pub keep_id: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct MemoryStats {
+    pub used: usize,
+    pub total: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct AttestationReport {
+    pub keep_id: String,
+    pub timestamp: u64,
+    pub enclave_type: EnclaveType,
+    pub measurement: Vec<u8>,
+}
