@@ -169,37 +169,39 @@ impl ExecutorPool {
     }
 
 pub async fn handle_challenge(
-        &mut self,
-        challenge: Challenge,
-    ) -> Result<(), Error> {
-        let challenged_executor = match challenge.challenge_type {
-            ChallengeType::Attestation | ChallengeType::Execution => {
-                self.get_executor_by_address(challenge.challenged)?
-            }
-        };
-
-        // Update executor status
-        challenged_executor.status = ExecutorStatus::Challenged;
-
-        // Handle based on challenge type
-        match challenge.challenge_type {
-            ChallengeType::Attestation => {
-                self.handle_attestation_challenge(
-                    challenged_executor,
-                    &challenge,
-                ).await?;
-            }
-            ChallengeType::Execution => {
-                self.handle_execution_challenge(
-                    challenged_executor,
-                    &challenge,
-                ).await?;
-            }
+    &mut self,
+    challenge: Challenge,
+) -> Result<()> {  // Just Result<()> instead of Result<(), Error>
+    let challenged_executor = match challenge.challenge_type {
+        ChallengeType::Attestation | ChallengeType::Execution => {
+            self.get_executor_by_address(challenge.challenged)
+                .map_err(|_| Error::ExecutorNotFound)?  // Using centralized Error type
         }
+    };
 
-        Ok(())
+    // Update executor status
+    challenged_executor.status = ExecutorStatus::Challenged;
+
+    // Handle based on challenge type
+    match challenge.challenge_type {
+        ChallengeType::Attestation => {
+            self.handle_attestation_challenge(
+                challenged_executor,
+                &challenge,
+            ).await
+            .map_err(|e| Error::challenge_error(format!("Attestation challenge failed: {}", e)))?
+        }
+        ChallengeType::Execution => {
+            self.handle_execution_challenge(
+                challenged_executor,
+                &challenge,
+            ).await
+            .map_err(|e| Error::challenge_error(format!("Execution challenge failed: {}", e)))?
+        }
     }
 
+    Ok(())
+}
     async fn handle_attestation_challenge(
         &mut self,
         executor: &mut ExecutorInstance,
