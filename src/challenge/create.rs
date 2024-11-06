@@ -1,5 +1,3 @@
-Original Version:
-
 use wasmlanche::{public, Context, Address};
 use crate::types::{Challenge, ChallengeType, ChallengeStatus, ChallengeEvidence};
 
