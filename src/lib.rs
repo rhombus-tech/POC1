@@ -7,6 +7,8 @@ pub mod core;
 pub mod challenge;
 pub mod external;
 pub mod execution;
+pub mod error;
+pub use error::{Error, Result};
 
 pub use types::*;
 pub use state::*;
