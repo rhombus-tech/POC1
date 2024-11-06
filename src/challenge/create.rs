@@ -69,5 +69,4 @@ pub enum Error {
     Unauthorized(String),
     StorageError(String),
 }
-New Version with centralized error handling:
 
