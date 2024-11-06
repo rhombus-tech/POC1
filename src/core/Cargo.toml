@@ -1,0 +1,11 @@
+[package]
+name = "shuttle-contract-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+wasmlanche = { version = "0.1.0" }
+tokio = { version = "1.0", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+thiserror = "1.0"
+tee-contract-types = { path = "../types" }
