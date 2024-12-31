@@ -1,97 +1,95 @@
+mod pool;
+mod metrics;
+
+pub use pool::ExecutorPool;
 use crate::enarx::{Keep, EnarxConfig, DrawbridgeToken};
-use crate::types::EnclaveType;
+use crate::types::{EnclaveType, ExecutionResult};
+use crate::error::{Error, Result};
 use wasmlanche::{Context, Address};
 
 pub struct Executor {
     keep: Keep,
     enclave_type: EnclaveType,
     drawbridge_token: DrawbridgeToken,
-    state: ExecutorState,
-}
-
-#[derive(Debug)]
-struct ExecutorState {
-    last_verified_height: u64,
-    cached_state: Option<Vec<u8>>,
     active: bool,
 }
 
 impl Executor {
-    pub fn new(config: EnarxConfig, enclave_type: EnclaveType) -> Result<Self, Error> {
+    pub async fn new(config: &EnarxConfig, enclave_type: EnclaveType) -> Result<Self> {
         // Initialize Enarx Keep
-        let keep = Keep::new(&config, enclave_type)?;
+        let keep = Keep::new(config, enclave_type).await?;
         
-        // Verify attestation
-        let attestation_result = keep.verify_attestation()?;
-        assert!(attestation_result.valid, "Invalid attestation");
-
-        // Get Drawbridge token
-        let drawbridge_token = keep.get_drawbridge_token()?;
-
+        // Verify initial attestation
+        let attestation = keep.verify_attestation().await?;
+        assert!(attestation.valid, "Invalid attestation");
+        
+        // Get initial Drawbridge token
+        let drawbridge_token = keep.get_drawbridge_token().await?;
+        
         Ok(Self {
             keep,
             enclave_type,
             drawbridge_token,
-            state: ExecutorState {
-                last_verified_height: 0,
-                cached_state: None,
-                active: true,
-            },
+            active: true,
         })
     }
 
-    pub fn execute(
+    pub async fn execute(
         &mut self,
-        context: &mut Context,
+        context: &Context,
         execution_id: u128,
         payload: Vec<u8>,
-    ) -> Result<ExecutionResult, Error> {
-        // Verify Keep is still valid
-        self.verify_keep_status(context)?;
-
-        // Execute in Keep
-        let result = self.execute_in_keep(payload)?;
-
-        // Create execution result with attestation
-        let execution_result = ExecutionResult {
+    ) -> Result<ExecutionResult> {
+        // Check Keep status
+        self.verify_keep_status(context).await?;
+        
+        // Execute in Keep and get proof
+        let (result, proof) = self.keep.execute_and_prove(payload).await?;
+        
+        Ok(ExecutionResult {
             execution_id,
-            result_hash: result.hash(),
-            keep_id: self.keep.id.clone(),
-            attestation: self.keep.verify_attestation()?,
-            drawbridge_token: self.drawbridge_token.clone(),
+            result,
+            proof,
+            enclave_type: self.enclave_type,
             timestamp: context.timestamp(),
-        };
-
-        Ok(execution_result)
+            block_height: context.block_height(),
+            drawbridge_token: self.drawbridge_token.clone(),
+        })
     }
 
-    fn verify_keep_status(&mut self, context: &mut Context) -> Result<(), Error> {
-        // Verify Drawbridge token
-        if self.drawbridge_token.is_expired(context.timestamp()) {
-            // Refresh token
-            self.drawbridge_token = self.keep.get_drawbridge_token()?;
+    async fn verify_keep_status(&mut self, context: &Context) -> Result<()> {
+        // Verify health
+        let health = self.keep.health_check().await?;
+        if !health.healthy {
+            self.active = false;
+            return Err(Error::UnhealthyKeep);
         }
-
-        // Verify attestation is still valid
-        let attestation = self.keep.verify_attestation()?;
+        
+        // Refresh token if needed
+        if self.drawbridge_token.is_expired(context.timestamp()) {
+            self.drawbridge_token = self.keep.get_drawbridge_token().await?;
+        }
+        
+        // Verify attestation
+        let attestation = self.keep.verify_attestation().await?;
         if !attestation.valid {
-            self.state.active = false;
+            self.active = false;
             return Err(Error::InvalidAttestation);
         }
-
+        
         Ok(())
     }
 
-    fn execute_in_keep(&mut self, payload: Vec<u8>) -> Result<KeepExecutionResult, Error> {
-        // Execute payload in Enarx Keep
-        let result = self.keep.execute(payload)?;
-        
-        // Update cached state if needed
-        if let Some(new_state) = result.state_update {
-            self.state.cached_state = Some(new_state);
-            self.state.last_verified_height = result.height;
-        }
+    pub fn is_active(&self) -> bool {
+        self.active
+    }
 
-        Ok(result)
+    pub fn enclave_type(&self) -> EnclaveType {
+        self.enclave_type
+    }
+
+    pub fn keep(&self) -> &Keep {
+        // Provide access to Keep for health checks etc.
+        &self.keep
     }
 }
